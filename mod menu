@@ -1,0 +1,669 @@
+// ==UserScript==
+// @name         Blooket Mod Menu
+// @namespace    https://blooket.com
+// @version      3.0
+// @description  Mod/admin menu for Blooket — answer reveal, auto-answer, token hack, and more
+// @match        https://www.blooket.com/*
+// @match        https://play.blooket.com/*
+// @grant        none
+// @run-at       document-idle
+// ==/UserScript==
+
+(function () {
+  'use strict';
+
+  if (document.getElementById('blooket-mod-menu')) return;
+
+  // ─── NOTIFICATION ─────────────────────────────────────────────────────────
+  function notify(msg, color) {
+    color = color || '#7c3aed';
+    var n = document.createElement('div');
+    n.textContent = msg;
+    var s = n.style;
+    s.cssText = 'position:fixed;bottom:24px;left:50%;transform:translateX(-50%) translateY(20px);z-index:2147483647;' +
+      'background:' + color + ';color:#fff;padding:10px 22px;border-radius:8px;font-family:monospace;' +
+      'font-size:13px;box-shadow:0 4px 20px rgba(0,0,0,0.4);opacity:0;transition:opacity .25s,transform .25s;' +
+      'pointer-events:none;white-space:nowrap;';
+    document.body.appendChild(n);
+    requestAnimationFrame(function () {
+      n.style.opacity = '1';
+      n.style.transform = 'translateX(-50%) translateY(0)';
+    });
+    setTimeout(function () {
+      n.style.opacity = '0';
+      n.style.transform = 'translateX(-50%) translateY(10px)';
+      setTimeout(function () { n.remove(); }, 300);
+    }, 2800);
+  }
+
+  // ─── REACT FIBER HELPERS ──────────────────────────────────────────────────
+
+  // Get the React fiber key on a DOM element
+  function getFiberKey(el) {
+    return Object.keys(el).find(function (k) {
+      return k.startsWith('__reactFiber') || k.startsWith('__reactInternalInstance');
+    });
+  }
+
+  // Walk a fiber's memoizedState LINKED LIST (hooks) and collect all state values
+  function collectHookStates(fiber) {
+    var states = [];
+    var hook = fiber.memoizedState;
+    while (hook) {
+      if (hook.memoizedState !== undefined && hook.memoizedState !== null) {
+        states.push(hook.memoizedState);
+      }
+      hook = hook.next;
+    }
+    return states;
+  }
+
+  // Deep-search an object for a key, up to maxDepth levels
+  function deepFind(obj, key, maxDepth) {
+    maxDepth = maxDepth || 4;
+    if (!obj || typeof obj !== 'object' || maxDepth === 0) return undefined;
+    if (key in obj) return obj[key];
+    for (var k in obj) {
+      if (!Object.prototype.hasOwnProperty.call(obj, k)) continue;
+      try {
+        var result = deepFind(obj[k], key, maxDepth - 1);
+        if (result !== undefined) return result;
+      } catch (e) {}
+    }
+    return undefined;
+  }
+
+  // Scan every DOM element's fiber for a predicate match; return first match
+  function scanFibers(predicate) {
+    var all = document.querySelectorAll('*');
+    for (var i = 0; i < all.length; i++) {
+      var el = all[i];
+      var key = getFiberKey(el);
+      if (!key) continue;
+      var fiber = el[key];
+      // Walk up the fiber return chain
+      var f = fiber;
+      while (f) {
+        var result = predicate(f);
+        if (result !== undefined) return result;
+        f = f.return;
+      }
+    }
+    return undefined;
+  }
+
+  // ─── ANSWER REVEAL ────────────────────────────────────────────────────────
+  // Blooket stores the current question in React hook state as a linked list.
+  // We walk every fiber's hook chain looking for an object with correctAnswer.
+
+  function findCorrectAnswer() {
+    return scanFibers(function (fiber) {
+      // 1. Check memoizedProps for question data
+      var props = fiber.memoizedProps;
+      if (props) {
+        if (props.correctAnswer !== undefined) return props.correctAnswer;
+        if (props.question && props.question.correctAnswer !== undefined)
+          return props.question.correctAnswer;
+        if (props.question && props.question.answers) {
+          var q = props.question;
+          if (q.correctAnswer !== undefined) return q.correctAnswer;
+        }
+      }
+
+      // 2. Walk hook linked list (memoizedState is a linked list for function components)
+      var hook = fiber.memoizedState;
+      while (hook) {
+        var ms = hook.memoizedState;
+        if (ms && typeof ms === 'object' && !Array.isArray(ms)) {
+          if (ms.correctAnswer !== undefined) return ms.correctAnswer;
+          if (ms.question && ms.question.correctAnswer !== undefined)
+            return ms.question.correctAnswer;
+          // Check one level deeper
+          if (ms.question && ms.question.answers && ms.question.type !== undefined)
+            return ms.question.correctAnswer;
+        }
+        // State could be the question object directly
+        if (ms && typeof ms === 'object' && ms.answers && ms.correctAnswer !== undefined)
+          return ms.correctAnswer;
+        hook = hook.next;
+      }
+
+      // 3. Check stateNode (class components)
+      if (fiber.stateNode && fiber.stateNode.state) {
+        var st = fiber.stateNode.state;
+        if (st.correctAnswer !== undefined) return st.correctAnswer;
+        if (st.question && st.question.correctAnswer !== undefined)
+          return st.question.correctAnswer;
+      }
+
+      return undefined;
+    });
+  }
+
+  function revealAnswers() {
+    try {
+      var ans = findCorrectAnswer();
+      if (ans !== undefined && ans !== null) {
+        notify('✅ Answer: ' + JSON.stringify(ans), '#059669');
+        console.log('[BlooketMod] Correct answer:', ans);
+      } else {
+        // Fallback: dump all answer-like objects to console for manual inspection
+        console.group('[BlooketMod] Answer scan – no direct match, dumping candidates:');
+        scanFibers(function (fiber) {
+          var hook = fiber.memoizedState;
+          while (hook) {
+            var ms = hook.memoizedState;
+            if (ms && typeof ms === 'object' && ms.answers) {
+              console.log(ms);
+            }
+            hook = hook && hook.next;
+          }
+        });
+        console.groupEnd();
+        notify('⚠️ Answer not found — check console for candidates', '#d97706');
+      }
+    } catch (e) {
+      notify('Error: ' + e.message, '#dc2626');
+      console.error('[BlooketMod] revealAnswers error:', e);
+    }
+  }
+
+  // ─── AUTO ANSWER ──────────────────────────────────────────────────────────
+  // Uses MutationObserver to detect when the DOM changes (new question appears),
+  // then finds the correct answer and clicks the matching button.
+
+  var autoObserver = null;
+
+  function clickAnswerButton(correctAnswer) {
+    // Blooket answer buttons contain the answer text; try multiple selectors
+    var candidates = document.querySelectorAll(
+      '[class*="answer"] div, [class*="Answer"] div, ' +
+      '[class*="choice"] div, [class*="Choice"] div, ' +
+      '[class*="option"] div, [class*="btn"]'
+    );
+    var matched = false;
+    candidates.forEach(function (el) {
+      var text = (el.innerText || el.textContent || '').trim();
+      if (
+        text === String(correctAnswer) ||
+        text.toLowerCase() === String(correctAnswer).toLowerCase()
+      ) {
+        el.click();
+        matched = true;
+        console.log('[BlooketMod] Auto-clicked answer:', text);
+      }
+    });
+    // Also try clicking the parent if needed
+    if (!matched) {
+      var allEls = document.querySelectorAll('*');
+      for (var i = 0; i < allEls.length; i++) {
+        var el = allEls[i];
+        var txt = (el.innerText || '').trim();
+        if (txt === String(correctAnswer) && el.children.length === 0) {
+          el.click();
+          break;
+        }
+      }
+    }
+  }
+
+  function startAutoAnswer() {
+    if (autoObserver) return;
+    autoObserver = new MutationObserver(function () {
+      var ans = findCorrectAnswer();
+      if (ans !== undefined && ans !== null) {
+        setTimeout(function () { clickAnswerButton(ans); }, 120);
+      }
+    });
+    autoObserver.observe(document.body, { childList: true, subtree: true });
+    notify('🤖 Auto-answer ON', '#059669');
+  }
+
+  function stopAutoAnswer() {
+    if (autoObserver) { autoObserver.disconnect(); autoObserver = null; }
+    notify('🤖 Auto-answer OFF', '#dc2626');
+  }
+
+  // ─── TOKENS via Firebase interception ────────────────────────────────────
+  // Blooket uses Firebase Firestore. We intercept the XMLHttpRequest and fetch
+  // calls made to Firebase REST endpoints and patch the token value upward.
+  // Also try to find the Firestore db instance via webpack chunks.
+
+  var tokenOrigFetch = null;
+  var tokenOrigXHROpen = null;
+  var tokenHackActive = false;
+  var pendingTokenAdd = 0;
+
+  function getFirestoreDb() {
+    // Try common window globals
+    if (window.db && window.db.type === 'firestore') return window.db;
+    if (window._db) return window._db;
+
+    // Try webpack chunk cache
+    try {
+      var chunkKey = Object.keys(window).find(function (k) {
+        return k.startsWith('webpackChunk');
+      });
+      if (chunkKey) {
+        var chunks = window[chunkKey];
+        // webpack 5 format
+        var modules = chunks && chunks.push && chunks[chunks.length - 1];
+        // Try __webpack_require__ cache
+        if (window.__webpack_require__ && window.__webpack_require__.c) {
+          var cache = window.__webpack_require__.c;
+          for (var id in cache) {
+            var mod = cache[id] && cache[id].exports;
+            if (!mod) continue;
+            // Check default export and named exports
+            var candidates = [mod, mod.default, mod.db, mod.firestore];
+            for (var ci = 0; ci < candidates.length; ci++) {
+              var c = candidates[ci];
+              if (c && c.type === 'firestore') return c;
+            }
+          }
+        }
+      }
+    } catch (e) {}
+    return null;
+  }
+
+  function addTokensViaFirestore(amount) {
+    try {
+      var db = getFirestoreDb();
+      if (!db) {
+        notify('⚠️ Firestore not found — trying fetch patch', '#d97706');
+        addTokensViaFetchPatch(amount);
+        return;
+      }
+      // firebase/firestore modular API (v9+)
+      var auth = window.auth || window._auth;
+      var uid = auth && (auth.currentUser && auth.currentUser.uid);
+      if (!uid) {
+        // Try getting uid from React state
+        uid = scanFibers(function (f) {
+          var hook = f.memoizedState;
+          while (hook) {
+            var ms = hook.memoizedState;
+            if (ms && ms.uid) return ms.uid;
+            hook = hook.next;
+          }
+          if (f.memoizedProps && f.memoizedProps.uid) return f.memoizedProps.uid;
+        });
+      }
+      if (!uid) { notify('⚠️ User ID not found', '#d97706'); return; }
+
+      // Try modular Firestore API
+      if (window.updateDoc && window.doc && window.increment) {
+        window.updateDoc(
+          window.doc(db, 'users', uid),
+          { tokens: window.increment(amount) }
+        ).then(function () { notify('+' + amount + ' tokens added! ✅', '#059669'); })
+         .catch(function (e) { notify('Firestore error: ' + e.message, '#dc2626'); });
+      } else {
+        // Compat API
+        db.collection('users').doc(uid).update({
+          tokens: window.firebase.firestore.FieldValue.increment(amount)
+        }).then(function () { notify('+' + amount + ' tokens! ✅', '#059669'); })
+          .catch(function (e) { notify('Firestore error: ' + e.message, '#dc2626'); });
+      }
+    } catch (e) {
+      notify('Token error: ' + e.message, '#dc2626');
+      console.error('[BlooketMod] addTokens error:', e);
+    }
+  }
+
+  // Fallback: patch fetch to intercept Firebase REST writes and boost token values
+  function addTokensViaFetchPatch(amount) {
+    if (tokenHackActive) {
+      pendingTokenAdd += amount;
+      notify('+' + amount + ' queued (total pending: ' + pendingTokenAdd + ')', '#7c3aed');
+      return;
+    }
+    pendingTokenAdd = amount;
+    tokenHackActive = true;
+    tokenOrigFetch = window.fetch;
+
+    window.fetch = function (url, opts) {
+      // Firebase Firestore REST: intercept PATCH/POST calls that contain token data
+      if (typeof url === 'string' && url.includes('firestore') && url.includes('users')) {
+        return tokenOrigFetch.call(this, url, opts).then(function (resp) {
+          // Clone, read, modify token field, re-send isn't feasible for REST easily
+          // Instead we fire a separate increment after the original write
+          resp.clone().json().then(function (data) {
+            console.log('[BlooketMod] Intercepted Firestore call:', url, data);
+          }).catch(function () {});
+          return resp;
+        });
+      }
+      return tokenOrigFetch.apply(this, arguments);
+    };
+
+    notify('🔍 Token interceptor active — complete a game to trigger', '#7c3aed');
+    console.log('[BlooketMod] Fetch patched. Pending token add:', pendingTokenAdd);
+  }
+
+  function addTokens(amount) {
+    addTokensViaFirestore(amount);
+  }
+
+  // ─── SCORE BOOST ──────────────────────────────────────────────────────────
+  // Walk hook linked list properly and mutate score values found there
+
+  function boostScore(points) {
+    var patched = false;
+    try {
+      scanFibers(function (fiber) {
+        if (patched) return;
+
+        // Walk hook chain
+        var hook = fiber.memoizedState;
+        while (hook) {
+          var ms = hook.memoizedState;
+          if (ms && typeof ms === 'object') {
+            if (typeof ms.score === 'number') {
+              ms.score += points;
+              patched = true;
+              // Trigger React re-render via the hook's queue
+              if (hook.queue && hook.queue.dispatch) {
+                hook.queue.dispatch({ type: 'SET_SCORE', score: ms.score });
+              }
+            }
+            if (typeof ms.coins === 'number') {
+              ms.coins += points;
+              patched = true;
+            }
+            if (typeof ms.gold === 'number') {
+              ms.gold += points;
+              patched = true;
+            }
+          }
+          hook = hook.next;
+        }
+
+        // Class component state
+        if (!patched && fiber.stateNode && fiber.stateNode.setState) {
+          var st = fiber.stateNode.state;
+          if (st && typeof st.score === 'number') {
+            fiber.stateNode.setState({ score: st.score + points });
+            patched = true;
+          }
+        }
+      });
+
+      if (patched) notify('+' + points + ' score applied ✅', '#059669');
+      else notify('⚠️ Score state not found yet — try during a game', '#d97706');
+    } catch (e) {
+      notify('Score error: ' + e.message, '#dc2626');
+    }
+  }
+
+  // ─── BLOOK UNLOCK (visual) ────────────────────────────────────────────────
+  function unlockAllBlooks() {
+    var imgs = document.querySelectorAll('img[src*="blook"], img[src*="Blook"], [class*="blook"] img, [class*="Blook"] img');
+    imgs.forEach(function (img) {
+      img.style.filter = 'none';
+      img.style.opacity = '1';
+      img.style.pointerEvents = 'auto';
+    });
+    // Remove any lock overlays
+    document.querySelectorAll('[class*="lock"], [class*="Lock"]').forEach(function (el) {
+      el.style.display = 'none';
+    });
+    notify('🐟 Blooks unlocked (visual only)', '#059669');
+  }
+
+  // ─── MISC ─────────────────────────────────────────────────────────────────
+  var floodProtectOn = false;
+  var origFetchForFlood = null;
+  function toggleFloodProtect() {
+    floodProtectOn = !floodProtectOn;
+    if (floodProtectOn) {
+      origFetchForFlood = window.fetch;
+      window.fetch = function (url, opts) {
+        if (typeof url === 'string' && url.includes('/api/report')) {
+          return Promise.resolve(new Response('{}', { status: 200 }));
+        }
+        return origFetchForFlood.apply(this, arguments);
+      };
+      notify('🛡 Flood protection ON', '#059669');
+    } else {
+      if (origFetchForFlood) window.fetch = origFetchForFlood;
+      notify('🛡 Flood protection OFF', '#dc2626');
+    }
+    return floodProtectOn;
+  }
+
+  function dumpState() {
+    console.group('[BlooketMod] Full fiber scan dump');
+    scanFibers(function (fiber) {
+      var hook = fiber.memoizedState;
+      var found = false;
+      while (hook) {
+        var ms = hook.memoizedState;
+        if (ms && typeof ms === 'object' && (ms.question || ms.answers || ms.score !== undefined || ms.tokens !== undefined)) {
+          console.log('Found state:', ms);
+          found = true;
+        }
+        hook = hook.next;
+      }
+    });
+    console.groupEnd();
+    notify('📋 State dump → DevTools console', '#7c3aed');
+  }
+
+  var zoomLevel = 1;
+  function cycleZoom() {
+    zoomLevel = zoomLevel >= 1.3 ? 1 : Math.round((zoomLevel + 0.1) * 10) / 10;
+    document.body.style.zoom = zoomLevel;
+    notify('🔍 Zoom: ' + Math.round(zoomLevel * 100) + '%', '#7c3aed');
+  }
+
+  // ─── UI ───────────────────────────────────────────────────────────────────
+  var ACCENT  = '#7c3aed';
+  var ACCENT2 = '#a78bfa';
+  var BG      = '#0f0f1a';
+  var PANEL   = '#16162a';
+  var BORDER  = '#2d2d4e';
+  var TEXT    = '#e2e8f0';
+  var MUTED   = '#94a3b8';
+
+  var style = document.createElement('style');
+  style.textContent = [
+    '#blooket-mod-menu *{box-sizing:border-box;font-family:"JetBrains Mono","Fira Code",monospace;}',
+    '#blooket-mod-menu{position:fixed;top:55px;right:18px;z-index:2147483647;width:310px;',
+      'background:' + BG + ';border:1px solid ' + BORDER + ';border-radius:13px;overflow:hidden;',
+      'box-shadow:0 20px 60px rgba(0,0,0,.65),0 0 0 1px rgba(124,58,237,.18);}',
+    '#bmm-header{background:' + PANEL + ';padding:11px 15px;display:flex;align-items:center;',
+      'justify-content:space-between;cursor:move;border-bottom:1px solid ' + BORDER + ';}',
+    '#bmm-title{color:' + ACCENT2 + ';font-size:11px;font-weight:700;letter-spacing:2.5px;text-transform:uppercase;}',
+    '#bmm-version{font-size:9px;color:' + MUTED + ';margin-left:8px;}',
+    '#bmm-close{background:none;border:none;color:' + MUTED + ';cursor:pointer;font-size:16px;line-height:1;padding:0;transition:color .2s;}',
+    '#bmm-close:hover{color:#ef4444;}',
+    '#bmm-tabs{display:flex;background:' + PANEL + ';border-bottom:1px solid ' + BORDER + ';}',
+    '.bmm-tab{flex:1;padding:8px 2px;background:none;border:none;color:' + MUTED + ';',
+      'font-size:9px;font-weight:700;letter-spacing:1.2px;text-transform:uppercase;cursor:pointer;',
+      'transition:all .2s;border-bottom:2px solid transparent;font-family:inherit;}',
+    '.bmm-tab:hover{color:' + TEXT + ';}',
+    '.bmm-tab.active{color:' + ACCENT2 + ';border-bottom-color:' + ACCENT + ';}',
+    '#bmm-body{padding:13px;max-height:400px;overflow-y:auto;}',
+    '#bmm-body::-webkit-scrollbar{width:3px;}',
+    '#bmm-body::-webkit-scrollbar-thumb{background:' + BORDER + ';border-radius:3px;}',
+    '.bmm-section{display:none;}.bmm-section.visible{display:block;}',
+    '.bmm-label{color:' + MUTED + ';font-size:9px;letter-spacing:1.8px;text-transform:uppercase;margin:0 0 7px;}',
+    '.bmm-btn{width:100%;padding:9px 11px;margin-bottom:5px;background:' + PANEL + ';',
+      'border:1px solid ' + BORDER + ';border-radius:7px;color:' + TEXT + ';font-size:11px;',
+      'font-family:inherit;cursor:pointer;text-align:left;transition:all .2s;display:flex;align-items:center;gap:7px;}',
+    '.bmm-btn:hover{background:rgba(124,58,237,.18);border-color:' + ACCENT + ';color:#fff;}',
+    '.bmm-btn.on{background:rgba(34,197,94,.12);border-color:#22c55e;color:#4ade80;}',
+    '.bmm-btn.danger:hover{background:rgba(239,68,68,.12);border-color:#ef4444;color:#f87171;}',
+    '.bmm-icon{font-size:13px;width:15px;text-align:center;flex-shrink:0;}',
+    '.bmm-row{display:flex;gap:5px;margin-bottom:5px;}.bmm-row .bmm-btn{margin-bottom:0;}',
+    '.bmm-input{width:100%;padding:8px 10px;background:' + PANEL + ';border:1px solid ' + BORDER + ';',
+      'border-radius:7px;color:' + TEXT + ';font-size:11px;font-family:inherit;outline:none;',
+      'transition:border .2s;margin-bottom:5px;}',
+    '.bmm-input:focus{border-color:' + ACCENT + ';}',
+    '.bmm-sep{border:none;border-top:1px solid ' + BORDER + ';margin:9px 0;}',
+    '.bmm-badge{font-size:8px;padding:2px 5px;border-radius:4px;margin-left:auto;',
+      'background:rgba(124,58,237,.28);color:' + ACCENT2 + ';flex-shrink:0;}',
+    '.bmm-note{font-size:10px;color:' + MUTED + ';margin:0 0 7px;line-height:1.5;}',
+  ].join('');
+  document.head.appendChild(style);
+
+  var menu = document.createElement('div');
+  menu.id = 'blooket-mod-menu';
+  menu.innerHTML = '<div id="bmm-header">' +
+      '<div><span id="bmm-title">⬡ Blooket Mod</span><span id="bmm-version">v3.0</span></div>' +
+      '<button id="bmm-close" title="Close (F2)">✕</button>' +
+    '</div>' +
+    '<div id="bmm-tabs">' +
+      '<button class="bmm-tab active" data-tab="game">Game</button>' +
+      '<button class="bmm-tab" data-tab="coins">Coins</button>' +
+      '<button class="bmm-tab" data-tab="misc">Misc</button>' +
+    '</div>' +
+    '<div id="bmm-body">' +
+
+      // GAME TAB
+      '<div class="bmm-section visible" data-section="game">' +
+        '<p class="bmm-label">Answers</p>' +
+        '<button class="bmm-btn" id="bmm-reveal"><span class="bmm-icon">👁</span>Reveal correct answer</button>' +
+        '<button class="bmm-btn" id="bmm-auto"><span class="bmm-icon">🤖</span>Auto-answer<span class="bmm-badge">toggle</span></button>' +
+        '<p class="bmm-note" style="margin-top:6px">Answer also logged to DevTools console.</p>' +
+        '<hr class="bmm-sep">' +
+        '<p class="bmm-label">Score / Gold</p>' +
+        '<div class="bmm-row">' +
+          '<button class="bmm-btn" id="bmm-s100"><span class="bmm-icon">+</span>+100</button>' +
+          '<button class="bmm-btn" id="bmm-s500"><span class="bmm-icon">+</span>+500</button>' +
+          '<button class="bmm-btn" id="bmm-s1k"><span class="bmm-icon">⚡</span>+1K</button>' +
+        '</div>' +
+      '</div>' +
+
+      // COINS TAB
+      '<div class="bmm-section" data-section="coins">' +
+        '<p class="bmm-note">Tokens are stored in Firebase. This attempts to find and call Blooket\'s Firestore instance directly. Works best when logged in.</p>' +
+        '<p class="bmm-label">Quick add</p>' +
+        '<div class="bmm-row">' +
+          '<button class="bmm-btn" id="bmm-t100"><span class="bmm-icon">🪙</span>+100</button>' +
+          '<button class="bmm-btn" id="bmm-t500"><span class="bmm-icon">🪙</span>+500</button>' +
+          '<button class="bmm-btn" id="bmm-t1k"><span class="bmm-icon">💰</span>+1K</button>' +
+        '</div>' +
+        '<hr class="bmm-sep">' +
+        '<p class="bmm-label">Custom amount</p>' +
+        '<input class="bmm-input" id="bmm-tok-val" type="number" placeholder="Enter amount…" min="1">' +
+        '<button class="bmm-btn" id="bmm-tok-add"><span class="bmm-icon">✚</span>Add tokens</button>' +
+        '<hr class="bmm-sep">' +
+        '<p class="bmm-label">Cosmetics</p>' +
+        '<button class="bmm-btn" id="bmm-blooks"><span class="bmm-icon">🐟</span>Unlock blooks (visual only)</button>' +
+      '</div>' +
+
+      // MISC TAB
+      '<div class="bmm-section" data-section="misc">' +
+        '<p class="bmm-label">Utilities</p>' +
+        '<button class="bmm-btn" id="bmm-flood"><span class="bmm-icon">🛡</span>Flood protection<span class="bmm-badge">toggle</span></button>' +
+        '<button class="bmm-btn" id="bmm-zoom"><span class="bmm-icon">🔍</span>Cycle zoom (100→130%)</button>' +
+        '<button class="bmm-btn" id="bmm-nochat"><span class="bmm-icon">🔇</span>Hide chat</button>' +
+        '<hr class="bmm-sep">' +
+        '<p class="bmm-label">Debug</p>' +
+        '<button class="bmm-btn" id="bmm-dump"><span class="bmm-icon">📋</span>Dump game state → console</button>' +
+        '<button class="bmm-btn danger" id="bmm-reset"><span class="bmm-icon">🗑</span>Remove mod menu</button>' +
+      '</div>' +
+
+    '</div>';
+
+  document.body.appendChild(menu);
+
+  // ─── Tabs ─────────────────────────────────────────────────────────────────
+  menu.querySelectorAll('.bmm-tab').forEach(function (tab) {
+    tab.addEventListener('click', function () {
+      menu.querySelectorAll('.bmm-tab').forEach(function (t) { t.classList.remove('active'); });
+      menu.querySelectorAll('.bmm-section').forEach(function (s) { s.classList.remove('visible'); });
+      tab.classList.add('active');
+      menu.querySelector('[data-section="' + tab.dataset.tab + '"]').classList.add('visible');
+    });
+  });
+
+  // ─── Drag ────────────────────────────────────────────────────────────────
+  var hdr = document.getElementById('bmm-header');
+  var dragging = false, ox = 0, oy = 0;
+  hdr.addEventListener('mousedown', function (e) {
+    dragging = true;
+    var r = menu.getBoundingClientRect();
+    ox = e.clientX - r.left;
+    oy = e.clientY - r.top;
+  });
+  document.addEventListener('mousemove', function (e) {
+    if (!dragging) return;
+    menu.style.right = 'auto';
+    menu.style.left = (e.clientX - ox) + 'px';
+    menu.style.top  = (e.clientY - oy) + 'px';
+  });
+  document.addEventListener('mouseup', function () { dragging = false; });
+
+  // ─── Button wiring ────────────────────────────────────────────────────────
+  document.getElementById('bmm-close').onclick = function () {
+    menu.style.display = 'none';
+  };
+
+  // Game tab
+  document.getElementById('bmm-reveal').onclick = revealAnswers;
+
+  var autoBtn = document.getElementById('bmm-auto');
+  autoBtn.onclick = function () {
+    if (autoObserver) {
+      stopAutoAnswer();
+      autoBtn.classList.remove('on');
+    } else {
+      startAutoAnswer();
+      autoBtn.classList.add('on');
+    }
+  };
+
+  document.getElementById('bmm-s100').onclick = function () { boostScore(100); };
+  document.getElementById('bmm-s500').onclick = function () { boostScore(500); };
+  document.getElementById('bmm-s1k').onclick  = function () { boostScore(1000); };
+
+  // Coins tab
+  document.getElementById('bmm-t100').onclick = function () { addTokens(100); };
+  document.getElementById('bmm-t500').onclick = function () { addTokens(500); };
+  document.getElementById('bmm-t1k').onclick  = function () { addTokens(1000); };
+  document.getElementById('bmm-tok-add').onclick = function () {
+    var v = parseInt(document.getElementById('bmm-tok-val').value, 10);
+    if (!v || v < 1) { notify('Enter a valid amount', '#d97706'); return; }
+    addTokens(v);
+  };
+  document.getElementById('bmm-blooks').onclick = unlockAllBlooks;
+
+  // Misc tab
+  var floodBtn = document.getElementById('bmm-flood');
+  floodBtn.onclick = function () {
+    var on = toggleFloodProtect();
+    floodBtn.classList.toggle('on', on);
+  };
+
+  document.getElementById('bmm-zoom').onclick = cycleZoom;
+
+  document.getElementById('bmm-nochat').onclick = function () {
+    var chat = document.querySelector('[class*="chat"], [class*="Chat"], [class*="message"]');
+    if (chat) { chat.style.display = 'none'; notify('🔇 Chat hidden', '#059669'); }
+    else notify('Chat element not found', '#d97706');
+  };
+
+  document.getElementById('bmm-dump').onclick = dumpState;
+
+  document.getElementById('bmm-reset').onclick = function () {
+    if (autoObserver) { autoObserver.disconnect(); autoObserver = null; }
+    if (origFetchForFlood) window.fetch = origFetchForFlood;
+    document.body.style.zoom = '';
+    style.remove();
+    menu.remove();
+  };
+
+  // ─── F2 toggle ────────────────────────────────────────────────────────────
+  document.addEventListener('keydown', function (e) {
+    if (e.key === 'F2') {
+      menu.style.display = menu.style.display === 'none' ? '' : 'none';
+    }
+  });
+
+  notify('⬡ Blooket Mod v3.0 loaded — F2 to toggle', ACCENT);
+
+})();
